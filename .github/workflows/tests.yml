@@ -32,6 +32,9 @@ jobs:
       - name: host 端到端自测
         run: node tools/selftest.mjs
 
+      - name: 压缩计费测试
+        run: node tools/compaction-test.mjs
+
       - name: 渲染测试
         run: node tools/render-test.mjs .
 

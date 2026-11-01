@@ -96,17 +96,18 @@ sha256sum dsh-balance-chip-<版本>.tgz
 
 ## 测试
 
-五套测试全是纯 Node、零依赖、**不联网**，也不用启动 DSH。
+六套测试全是纯 Node、零依赖、**不联网**，也不用启动 DSH。
 
 > **运行环境要求 Node ≥ 22.15.0** —— host 端用 `node:zlib` 的 `zstdDecompressSync`
 > 解压会话日志，该 API 自 Node 22.15.0 起提供。（DSH 桌面版内置的是 Node 24，满足。）
 
 ```bash
-node tools/selftest.mjs         # 68 项  host 端到端（余额、计费、回环校验、换轮基准）
-node tools/render-test.mjs .    # 110 项  渲染（金额精度、标签配对、胶囊可见性、面板结构）
-node tools/heartbeat-test.mjs . #  6 项  心跳独立于组件、节奏参数
-node tools/refresh-test.mjs .   # 13 项  「立即刷新」的排队与补发
-node tools/gen-preview.mjs      # 28 项  预览页自检
+node tools/selftest.mjs          #  99 项  host 端到端（余额、计费、回环校验、换轮基准）
+node tools/compaction-test.mjs    #  21 项  压缩计费（金额合成、轮次归属、增量、重写）
+node tools/render-test.mjs .      # 131 项  渲染（金额精度、标签配对、胶囊可见性、面板结构）
+node tools/heartbeat-test.mjs .   #   6 项  心跳独立于组件、节奏参数
+node tools/refresh-test.mjs .     #  13 项  「立即刷新」的排队与补发
+node tools/gen-preview.mjs        #  28 项  预览页自检
 ```
 
 退出码 0 即全部通过。CI 在 Node 22 / 24 上跑（[.github/workflows/tests.yml](./.github/workflows/tests.yml)）。
@@ -237,7 +238,7 @@ dsh plugin --profile desktop add "C:\路径\dsh-balance-chip-<版本>.tgz"
 | 总余额 | 下面两者之和（host 计算） | 胶囊与浮层标题都显示它。账号侧返回的是 `normal_wallets` 与 `bonus_wallets` **两个并列钱包**，`total` 由插件相加得出；赠金缺省时就等于充值余额 |
 | 充值余额 | `ctx.deepseekAccount.getBalance(client)` 的 `normal_wallets` | DSH 账号服务；已处理凭据读取、Platform 的五个 `x-client-*` 头、余额超时与 401 失效。兜底可走 `GET api.deepseek.com/user/balance`（API Key 账号，那里 `total_balance` 本身就是总额）。**浮层正文第一排显示的就是这个数** |
 | 赠金余额 | 同上返回值的 `bonusWallets` | 账号的**第二个钱包**（送的那部分，会过期）。官方账号设置页并列展示「充值余额 / 赠金余额」；本插件放在浮层正文第二排，没有时显示 `—`。**官方扣费规则：两种余额同时存在时优先扣减赠送余额**（[文档](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)），所以行标签写作「赠金余额（优先消耗）」 |
-| 会话累计 | `ctx.sessionProjections.stateOf(session, "tokenUsage")` 的 `totals` | 官方 `@deepseek-ai/dsh-token-meter` 注册的会话投影 |
+| 会话累计 | 官方 `tokenUsage` 投影的 `totals` **+ 压缩用量** | 官方 `@deepseek-ai/dsh-token-meter` 的投影只认 `assistant/message` / `assistant/attempt`，**压缩事件不在其中**，所以压缩那笔由本插件扫会话日志补上（见下节） |
 | **本轮消耗** | `当前 totals − 本轮起点 totals` | **本插件补出来的口径**。官方只有 `totals`（整会话）与 `last`（最近一步），没有"一轮合计"。做法：在 `turn/start` 事件记下当时的 `totals` 作基准（按会话存 `WeakMap`），每次请求做差 |
 | 每轮平均消耗 | 会话累计 ÷ `sessionStats.turns` | 官方 `session-stats` 投影提供轮数。这是现有数据下唯一能回答"一句话大约多少钱"的数 |
 | 缓存占比 | `totals.cacheReadTokens ÷ 四项之和` | 解释成本为何低：缓存读取单价 0.02，未缓存输入 1，差 50 倍 |
@@ -258,6 +259,34 @@ dsh plugin --profile desktop add "C:\路径\dsh-balance-chip-<版本>.tgz"
 | 输入（缓存**命中**） | 0.02 | 0.04 |
 | 输入（缓存**未命中**） | 1 | 2 |
 | 输出 | 4 | 8 |
+
+## 压缩（compact）也算钱，但官方不统计
+
+压缩把长上下文缩成摘要，是**一次真实的模型调用**，照价扣费。但 host 的 `tokenUsage`
+投影只认 `assistant/message` 与 `assistant/attempt` —— `compaction/summary` 被直接
+忽略（它带着 `usage`、`time`、`seq`，投影只是不看）。
+
+后果不是小数。实测一个 88 次压缩、79 条消息的会话：
+
+| | 缓存未命中输入 | 输出 | 缓存命中 | 空闲时段金额 |
+|---|---|---|---|---|
+| 可见（投影里有） | 2,263,084 | 47,220 | 4,321,792 | ¥2.54 |
+| 压缩（投影里没有） | 461,716 | 232,099 | 4,060,672 | ¥1.47 |
+
+压缩的输出 token 是正常输出的 **4.9 倍**，漏掉这部分等于**少算 37%**。
+
+更别扭的是「本日消耗」按事件扫日志、**从来不按类型过滤**，所以它一直含压缩 ——
+不补的话同一个会话里会出现「本日 > 会话累计」，看起来像插件算错了。
+
+现在三个金额口径和「会话 token」都并入压缩，浮层还单列一行「压缩消耗」。
+
+实现要点：
+
+- 扫描器**按会话**扫（不能复用 `scanTodayUsage`：那个只算今天、且把所有会话加在一起）
+- **增量**：记住已处理到的帧偏移，只解压新帧；文件变小（被重写）就整个重扫；末帧
+  写了一半时停在它前面，下次再补
+- 「本轮」按 `seq >= openTurnStartSeq` 归属 —— 压缩事件**没有 `turn` 字段**
+- 计价按**事件自己的时间戳**取单价，不拿此刻单价套历史（否则时段边界一过金额自己变）
 
 ## 高峰 / 空闲是怎么判断的
 
