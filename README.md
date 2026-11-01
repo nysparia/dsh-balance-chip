@@ -96,14 +96,15 @@ sha256sum dsh-balance-chip-<版本>.tgz
 
 ## 测试
 
-六套测试全是纯 Node、零依赖、**不联网**，也不用启动 DSH。
+七套测试全是纯 Node、零依赖、**不联网**，也不用启动 DSH。
 
 > **运行环境要求 Node ≥ 22.15.0** —— host 端用 `node:zlib` 的 `zstdDecompressSync`
 > 解压会话日志，该 API 自 Node 22.15.0 起提供。（DSH 桌面版内置的是 Node 24，满足。）
 
 ```bash
 node tools/selftest.mjs          #  99 项  host 端到端（余额、计费、回环校验、换轮基准）
-node tools/compaction-test.mjs    #  35 项  压缩计费（金额合成、轮次归属、换轮回退、增量、边界、多会话）
+node tools/compaction-test.mjs    #  39 项  压缩计费（金额合成、轮次归属、换轮回退、增量、边界、多会话）
+node tools/real-session-check.mjs #   2 项  真实会话交叉核对（无 ~/.dsh 时跳过）
 node tools/render-test.mjs .      # 135 项  渲染（金额精度、标签配对、胶囊可见性、面板结构）
 node tools/heartbeat-test.mjs .   #   6 项  心跳独立于组件、节奏参数
 node tools/refresh-test.mjs .     #  13 项  「立即刷新」的排队与补发

@@ -35,6 +35,9 @@ jobs:
       - name: 压缩计费测试
         run: node tools/compaction-test.mjs
 
+      - name: 真实会话交叉核对（无 ~/.dsh 时自动跳过）
+        run: node tools/real-session-check.mjs
+
       - name: 渲染测试
         run: node tools/render-test.mjs .
 

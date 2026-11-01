@@ -30,7 +30,7 @@ const home = mkdtempSync(join(tmpdir(), "bchip-compaction-"));
 process.env.DSH_HOME = home;
 
 const mod = await import(pathToFileURL(join(root, "lib", "index.js")).href);
-const { rateAt, foldCompactionEvents } = mod;
+const { rateAt, foldCompactionEvents, compactionScanStats } = mod;
 
 const SESSION_ID = "session-compaction-selftest";
 const WORKSPACE = "--C-Users-test-project--";
@@ -288,6 +288,33 @@ console.log("\n  ── 场景 11：只有压缩、没有对话用量 ──");
   const v = await fetchCost();
   ck(near(v?.cost?.total, price(bucketsOf(COMPACT_C))), "会话累计 = 压缩金额（官方口径为空也不吞掉）", "¥" + v?.cost?.total?.toFixed(6));
   ck(v?.cost?.totalTokens?.uncachedInputTokens === COMPACT_C.inputTokens, "token 也只有压缩那部分");
+}
+
+// ══ 场景 12：增量扫描的**确定性**性能判据 ══
+//
+// 不测墙钟时间（机器快慢、GC 抖动都会让断言飘）。测"本次解压了多少字节"——
+// 这个数与机器无关，且恰好是增量是否生效的直接证据：冷启动应接近整个文件，
+// 追加一帧应**只有那一帧**。
+console.log("\n  ── 场景 12：增量扫描只解压新帧（确定性判据）──");
+{
+  totals = { ...bucketsOf(ASSISTANT_USAGE) };
+  const many = [];
+  for (let i = 0; i < 300; i += 1) many.push([compactionEvent(2000 + i, COMPACT_B)]);
+  writeFrames(many);
+
+  const cold = await fetchCost();
+  const coldStats = compactionScanStats(SESSION_ID);
+  const fileSize = statSync(logFile).size;
+  ck(coldStats.decompressedBytes > fileSize * 0.9, "冷启动：解压量接近文件大小", coldStats.decompressedBytes + " / " + fileSize + " B");
+  ck(cold?.cost?.compact?.count === 300, "300 次压缩全部计入", String(cold?.cost?.compact?.count));
+
+  const oneFrame = encodeFrame([compactionEvent(3000, COMPACT_C)]);
+  appendFileSync(logFile, oneFrame);
+  await fetchCost();
+  const incStats = compactionScanStats(SESSION_ID);
+  ck(incStats.decompressedBytes === oneFrame.length, "追加一帧：只解压那一帧（与文件总大小无关）",
+    incStats.decompressedBytes + " vs " + oneFrame.length + " B");
+  ck(incStats.decompressedBytes < fileSize * 0.01, "解压量 < 全量的 1%");
 }
 
 rmSync(home, { recursive: true, force: true });
