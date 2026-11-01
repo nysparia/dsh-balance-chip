@@ -103,7 +103,7 @@ sha256sum dsh-balance-chip-<版本>.tgz
 
 ```bash
 node tools/selftest.mjs          #  99 项  host 端到端（余额、计费、回环校验、换轮基准）
-node tools/compaction-test.mjs    #  21 项  压缩计费（金额合成、轮次归属、增量、重写）
+node tools/compaction-test.mjs    #  23 项  压缩计费（金额合成、轮次归属、换轮回退、增量、重写）
 node tools/render-test.mjs .      # 131 项  渲染（金额精度、标签配对、胶囊可见性、面板结构）
 node tools/heartbeat-test.mjs .   #   6 项  心跳独立于组件、节奏参数
 node tools/refresh-test.mjs .     #  13 项  「立即刷新」的排队与补发

@@ -186,6 +186,22 @@ console.log("\n  ── 场景 5：追加一帧（增量扫描）──");
   ck(near(v?.cost?.turn, price(bucketsOf(COMPACT_B)) + expectC), "新压缩 seq=300 在本轮内，也计入本轮");
 }
 
+// ══ 场景 5b：**轮结束后回退的「上次」值也必须含压缩**（回归）══
+// 只改 totals 的差分会漏掉压缩：轮内显示 ¥3.1，一轮结束立刻掉回 ¥2.6。
+// 同一个数在换轮前后对不上，用户只会认为插件算错了。
+console.log("\n  ── 场景 5b：轮结束后回退值含压缩（回归）──");
+{
+  const during = (await fetchCost())?.cost?.turn;
+  openTurnStartSeq = null; // 一轮结束
+  const after = await fetchCost();
+  ck(near(after?.cost?.turn, during), "结束后回退值 = 轮结束时的实时值（压缩没有凭空消失）",
+    "¥" + after?.cost?.turn?.toFixed(6) + " vs ¥" + during?.toFixed(6));
+  ck(after?.cost?.turn > price(bucketsOf(COMPACT_B)), "回退值大于「只算 totals」的口径（证明压缩被算进去了）",
+    "¥" + after?.cost?.turn?.toFixed(6));
+  openTurnStartSeq = 300; // 恢复：让后续场景继续有进行中的轮次
+  await fetchCost();
+}
+
 // ══ 场景 6：日志被重写（变小）→ 全量重扫，不叠加旧值 ══
 console.log("\n  ── 场景 6：日志被重写（变小）──");
 {
