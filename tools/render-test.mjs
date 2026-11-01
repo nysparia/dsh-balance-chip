@@ -224,6 +224,8 @@ const panelText = panelRows({
     totalTokens: { cacheReadTokens: 100, uncachedInputTokens: 1, outputTokens: 2, cacheWriteTokens: 0 },
     dayTokens: { cacheReadTokens: 50, uncachedInputTokens: 1, outputTokens: 1, cacheWriteTokens: 0 },
     peak: false, holiday: false, holidayDataKnown: true,
+    // 压缩明细：金额已计入 total/turn，这行是单独说明"哪部分是官方投影里没有的"
+    compact: { yuan: 1.47, count: 12 },
   },
 });
 // ⚠️ 「本日消耗」已按用户要求**从正文移到头部右侧**，正文里不该再有 ——
@@ -250,6 +252,22 @@ ck(panelText.some((x) => x.includes("赠金余额（优先消耗）")), "赠金�
   ck(zero.some((x) => x.includes("赠金余额") && x.includes("—")), "赠金为 0 时显示占位 —（不是 ¥0.00）");
   ck(missing.some((x) => x.includes("赠金余额") && x.includes("—")), "取不到赠金时同样显示占位 —");
 }
+// ── 「压缩消耗」行 ──
+// 压缩（compaction/summary）真实扣费，但官方 tokenUsage 投影不统计它，
+// 所以金额是本插件扫日志补的。这行必须能显示"金额 + 次数"，否则用户无从判断
+// 会话累计里有没有含压缩。没有压缩时显示 "—"：¥0 会被读成"压缩不要钱"。
+ck(panelText.some((x) => x.includes("压缩消耗") && x.includes("¥1.47") && x.includes("12 次")),
+  "「压缩消耗」显示金额与次数", panelText.join(" / "));
+{
+  const none = panelRows({ configured: true, total: 100, cost: { total: 1 } });
+  ck(none.some((x) => x.includes("压缩消耗") && x.includes("—")), "没有压缩字段时显示占位 —");
+  const zero = panelRows({ configured: true, total: 100, cost: { total: 1, compact: { yuan: 0, count: 0 } } });
+  ck(zero.some((x) => x.includes("压缩消耗") && x.includes("—")), "压缩金额为 0 时也显示占位（不是 ¥0）");
+  const moneyOnly = panelRows({ configured: true, total: 100, cost: { total: 1, compact: { yuan: 0.5 } } });
+  ck(moneyOnly.some((x) => x.includes("压缩消耗") && x.includes("¥0.5") && !x.includes("undefined")),
+    "缺 count 时不渲染 undefined", moneyOnly.join(" / "));
+}
+
 // ── 「节假日数据」提示行 ──
 // 未收录当年节假日时，所有法定节假日都会被按工作日高峰计价（费率约 2 倍），
 // 而且不报错。原先只在「时段」的措辞上悄悄换一个说法，用户根本看不出差别 ——

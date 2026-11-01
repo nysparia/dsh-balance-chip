@@ -88,7 +88,13 @@ writeFrames([
 // ── 桩 ctx：与 selftest.mjs 同形状 ──
 let totals = { ...bucketsOf(ASSISTANT_USAGE) };
 let openTurnStartSeq = 150; // 轮起点落在 A(100) 与 B(200) 之间
-const session = { id: SESSION_ID };
+const OTHER_ID = "session-compaction-other";
+const NOLOG_ID = "session-compaction-nolog";
+const sessionObjects = new Map([
+  [SESSION_ID, { id: SESSION_ID }],
+  [OTHER_ID, { id: OTHER_ID }],
+  [NOLOG_ID, { id: NOLOG_ID }],
+]);
 const stateOf = (_s, key) => {
   if (key === "tokenUsage") return { totals, last: null };
   if (key === "turnBoundary") return { openTurnStartSeq, lastStepStartSeq: null, lastTurn: 1 };
@@ -98,7 +104,7 @@ const stateOf = (_s, key) => {
 
 let registered = null;
 const ctx = {
-  sessions: { get: (id) => (id === SESSION_ID ? session : undefined) },
+  sessions: { get: (id) => sessionObjects.get(id) },
   sessionProjections: { stateOf },
   webServer: { register: (route) => { registered = route; return () => {}; } },
   effect: (fn) => { fn(); },
@@ -111,8 +117,8 @@ if (!registered) {
   process.exit(1);
 }
 
-const fetchCost = async () => {
-  const raw = JSON.stringify({ type: "client-request", rpcId: "r1", method: "fetch", payload: { sessionId: SESSION_ID } });
+const fetchCost = async (sessionId = SESSION_ID) => {
+  const raw = JSON.stringify({ type: "client-request", rpcId: "r1", method: "fetch", payload: { sessionId } });
   const req = {
     method: "POST",
     url: "/balance-mini/fetch",
@@ -219,6 +225,69 @@ console.log("\n  ── 场景 7：没有压缩的会话 ──");
   const v = await fetchCost();
   ck(near(v?.cost?.total, price(bucketsOf(ASSISTANT_USAGE))), "会话累计 = 官方投影（无压缩时不多不少）", "¥" + v?.cost?.total?.toFixed(6));
   ck(v?.cost?.compact === undefined, "compact 为 undefined（界面显示占位而非 ¥0）");
+}
+
+// ══ 场景 8：会话存在但还没有日志目录（刚建立的会话）══
+// 这是最常见的运行时状态：ctx.sessions 里已经有会话对象，磁盘上却还没有日志。
+// 扫描器必须安静地返回 undefined，而不是抛错把整块 cost 打掉。
+console.log("\n  ── 场景 8：会话存在但还没有日志目录 ──");
+{
+  const v = await fetchCost(NOLOG_ID);
+  ck(v?.cost !== undefined, "cost 仍然存在（扫描失败不能打掉整块 cost）");
+  ck(near(v?.cost?.total, price(bucketsOf(ASSISTANT_USAGE))), "会话累计 = 官方投影口径（没有压缩可补）", "¥" + v?.cost?.total?.toFixed(6));
+  ck(v?.cost?.compact === undefined, "compact 为 undefined");
+}
+
+// ══ 场景 9：跨会话隔离 —— 每个会话只算自己的压缩 ══
+// 缓存按 sessionId 存在 Map 里，键写错就会串号：A 的压缩算到 B 头上，
+// 而且数字看起来仍然"合理"，只能靠对照断言抓。
+console.log("\n  ── 场景 9：跨会话隔离 ──");
+{
+  const otherDir = join(home, "sessions", WORKSPACE, OTHER_ID);
+  mkdirSync(otherDir, { recursive: true });
+  writeFileSync(join(otherDir, "session.v4.jsonl.zstd"), encodeFrame([compactionEvent(500, COMPACT_A)]));
+  writeFrames([[compactionEvent(600, COMPACT_B)], [compactionEvent(700, COMPACT_C)]]);
+
+  const a = await fetchCost(SESSION_ID);
+  const b = await fetchCost(OTHER_ID);
+  const expectA = price(bucketsOf(COMPACT_B)) + price(bucketsOf(COMPACT_C));
+  const expectB = price(bucketsOf(COMPACT_A));
+  ck(near(a?.cost?.compact?.yuan, expectA), "会话 A 只含自己的两次压缩", "¥" + a?.cost?.compact?.yuan?.toFixed(6));
+  ck(near(b?.cost?.compact?.yuan, expectB), "会话 B 只含自己的那次压缩", "¥" + b?.cost?.compact?.yuan?.toFixed(6));
+  ck(a?.cost?.compact?.count === 2 && b?.cost?.compact?.count === 1, "两个会话的压缩次数互不影响",
+    a?.cost?.compact?.count + " vs " + b?.cost?.compact?.count);
+}
+
+// ══ 场景 10：末帧只写了一半（读取时正在追加）══
+// 日志是边跑边写的：readFileSync 可能读到半个 zstd 帧。此时必须**停在它前面**，
+// 不能把半帧当完整帧解压（会抛错），也不能丢掉已处理的部分。
+console.log("\n  ── 场景 10：末帧只写了一半 ──");
+{
+  const frameA = encodeFrame([compactionEvent(800, COMPACT_A)]);
+  const frameB = encodeFrame([compactionEvent(900, COMPACT_C)]);
+  writeFileSync(logFile, Buffer.concat([frameA, frameB.subarray(0, 8)]));
+
+  const partial = await fetchCost();
+  ck(partial?.cost?.compact?.count === 1, "半帧被跳过，只算完整那一帧", String(partial?.cost?.compact?.count));
+  ck(near(partial?.cost?.compact?.yuan, price(bucketsOf(COMPACT_A))), "金额只含完整帧", "¥" + partial?.cost?.compact?.yuan?.toFixed(6));
+
+  // 把剩下的字节补上 —— 下一次必须从上次停下的位置接着解，且不重复计入第一帧
+  writeFileSync(logFile, Buffer.concat([frameA, frameB]));
+  const done = await fetchCost();
+  ck(done?.cost?.compact?.count === 2, "补齐后两帧都在（且第一帧没有重复计）", String(done?.cost?.compact?.count));
+  ck(near(done?.cost?.compact?.yuan, price(bucketsOf(COMPACT_A)) + price(bucketsOf(COMPACT_C))), "两帧金额相加", "¥" + done?.cost?.compact?.yuan?.toFixed(6));
+}
+
+// ══ 场景 11：只有压缩、没有对话用量 ══
+// `priceBuckets` 对全零桶返回 undefined，此时总金额必须**等于压缩金额**，
+// 而不是被 undefined 吞掉（addYuan 的意义就在这里）。
+console.log("\n  ── 场景 11：只有压缩、没有对话用量 ──");
+{
+  totals = { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  writeFrames([[compactionEvent(1000, COMPACT_C)]]);
+  const v = await fetchCost();
+  ck(near(v?.cost?.total, price(bucketsOf(COMPACT_C))), "会话累计 = 压缩金额（官方口径为空也不吞掉）", "¥" + v?.cost?.total?.toFixed(6));
+  ck(v?.cost?.totalTokens?.uncachedInputTokens === COMPACT_C.inputTokens, "token 也只有压缩那部分");
 }
 
 rmSync(home, { recursive: true, force: true });
